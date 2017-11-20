@@ -177,7 +177,7 @@ typedef void (^AWSS3TransferManagerResumeAllBlock) (AWSRequest *request);
 
  @return An instance of the service client.
  */
-+ (instancetype)S3TransferManagerForKey:(NSString *)key;
++ (nullable instancetype)S3TransferManagerForKey:(NSString *)key;
 
 /**
  Removes the service client associated with the key and release it.
