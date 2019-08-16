@@ -16,7 +16,6 @@
 #import "AWSPinpointContext.h"
 #import "AWSPinpointConfiguration.h"
 #import "AWSPinpointService.h"
-#import "AWSPinpointAnalytics.h"
 #import "AWSPinpointTargeting.h"
 
 static NSString *const AWSMobileAnalyticsRoot = @"com.amazonaws.MobileAnalytics";
@@ -27,14 +26,16 @@ static NSString *const AWSPinpointContextKeychainUniqueIdKey = @"com.amazonaws.A
 @interface AWSPinpointClientContext()
 
 @property (nonatomic, strong) NSString *clientId;
-
 @end
 
 @interface AWSPinpointContext ()
 @property (nonatomic, strong) AWSUICKeyChainStore *keychain;
 @property (nonatomic, strong) AWSPinpointClientContext *clientContext;
 @property (nonatomic, strong) NSString* uniqueId;
+@end
 
+@interface AWSPinpointConfiguration()
+@property (nonnull, strong) NSUserDefaults *userDefaults;
 @end
 
 @implementation AWSPinpointClientContext
@@ -110,16 +111,16 @@ static NSString *const AWSPinpointContextKeychainUniqueIdKey = @"com.amazonaws.A
                 AWSDDLogVerbose(@"Fallback: merge UniqueId to NSUserDefaults: %@", deviceUniqueId);
                 //Failed to save to Keychain, fallback to NSUserDefaults
                 deviceUniqueId = legacyUniqueId;
-                [[NSUserDefaults standardUserDefaults] setObject:deviceUniqueId forKey:AWSPinpointContextKeychainUniqueIdKey];
-                [[NSUserDefaults standardUserDefaults] synchronize];
+                [self.configuration.userDefaults setObject:deviceUniqueId forKey:AWSPinpointContextKeychainUniqueIdKey];
+                [self.configuration.userDefaults synchronize];
                 //Delete old file
                 if ([self removeLegacyFileWithConfiguration:self.configuration]) {
                     AWSDDLogVerbose(@"Cannot remove legacy preferences file.");
                 }
             }
         } else {
-            if ([[NSUserDefaults standardUserDefaults] stringForKey:AWSPinpointContextKeychainUniqueIdKey]) {
-                deviceUniqueId = [[NSUserDefaults standardUserDefaults] stringForKey:AWSPinpointContextKeychainUniqueIdKey];
+            if ([self.configuration.userDefaults stringForKey:AWSPinpointContextKeychainUniqueIdKey]) {
+                deviceUniqueId = [self.configuration.userDefaults stringForKey:AWSPinpointContextKeychainUniqueIdKey];
                 //Try and resave to Keychain
                 static dispatch_once_t onceToken;
                 dispatch_once(&onceToken, ^{
@@ -129,9 +130,9 @@ static NSString *const AWSPinpointContextKeychainUniqueIdKey = @"com.amazonaws.A
                 if ([self.keychain stringForKey:AWSPinpointContextKeychainUniqueIdKey]) {
                     AWSDDLogVerbose(@"Merged Pinpoint UniqueId to Keychain: %@", deviceUniqueId);
                     //Successful save to keychain, delete from UserDefaults
-                    [[NSUserDefaults standardUserDefaults] setObject:nil forKey:AWSPinpointContextKeychainUniqueIdKey];
-                    [[NSUserDefaults standardUserDefaults] removeObjectForKey:AWSPinpointContextKeychainUniqueIdKey];
-                    [[NSUserDefaults standardUserDefaults] synchronize];
+                    [self.configuration.userDefaults setObject:nil forKey:AWSPinpointContextKeychainUniqueIdKey];
+                    [self.configuration.userDefaults removeObjectForKey:AWSPinpointContextKeychainUniqueIdKey];
+                    [self.configuration.userDefaults synchronize];
                 }
             } else {
                 //Create new ID
@@ -148,8 +149,8 @@ static NSString *const AWSPinpointContextKeychainUniqueIdKey = @"com.amazonaws.A
                     AWSDDLogVerbose(@"Fallback: created new Pinpoint UniqueId and saved to NSUserDefaults: %@", deviceUniqueId);
                     //Fallback to save to UserDefaults
                     deviceUniqueId = [[NSUUID UUID] UUIDString];
-                    [[NSUserDefaults standardUserDefaults] setObject:deviceUniqueId forKey:AWSPinpointContextKeychainUniqueIdKey];
-                    [[NSUserDefaults standardUserDefaults] synchronize];
+                    [self.configuration.userDefaults setObject:deviceUniqueId forKey:AWSPinpointContextKeychainUniqueIdKey];
+                    [self.configuration.userDefaults synchronize];
                 }
             }
         }
@@ -157,12 +158,11 @@ static NSString *const AWSPinpointContextKeychainUniqueIdKey = @"com.amazonaws.A
     return deviceUniqueId;
 }
 
-- (AWSPinpointContext *) initWithConfiguration:(AWSPinpointConfiguration *) configuration {
+- (AWSPinpointContext *) initWithConfiguration:(AWSPinpointConfiguration *) configuration{
     if (self = [super init]) {
         _configuration = configuration;
         _keychain = [AWSUICKeyChainStore keyChainStoreWithService:AWSPinpointContextKeychainService];
         _uniqueId = [self retrieveUniqueId];
-        
         AWSPinpointEnvironment *environment = configuration.environment;
         _clientContext = [AWSPinpointClientContext new];
         _clientContext.appVersion = environment.appVersion;

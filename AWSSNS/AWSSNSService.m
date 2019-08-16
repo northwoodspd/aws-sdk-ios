@@ -1,5 +1,5 @@
 //
-// Copyright 2010-2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// Copyright 2010-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License").
 // You may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@
 #import "AWSSNSResources.h"
 
 static NSString *const AWSInfoSNS = @"SNS";
-static NSString *const AWSSNSSDKVersion = @"2.6.2";
+NSString *const AWSSNSSDKVersion = @"2.10.2";
 
 
 @interface AWSSNSResponseSerializer : AWSXMLResponseSerializer
@@ -41,13 +41,26 @@ static NSDictionary *errorCodeDictionary = nil;
 + (void)initialize {
     errorCodeDictionary = @{
                             @"AuthorizationError" : @(AWSSNSErrorAuthorizationError),
+                            @"ConcurrentAccess" : @(AWSSNSErrorConcurrentAccess),
                             @"EndpointDisabled" : @(AWSSNSErrorEndpointDisabled),
+                            @"FilterPolicyLimitExceeded" : @(AWSSNSErrorFilterPolicyLimitExceeded),
                             @"InternalError" : @(AWSSNSErrorInternalError),
                             @"InvalidParameter" : @(AWSSNSErrorInvalidParameter),
                             @"ParameterValueInvalid" : @(AWSSNSErrorInvalidParameterValue),
+                            @"InvalidSecurity" : @(AWSSNSErrorInvalidSecurity),
+                            @"KMSAccessDenied" : @(AWSSNSErrorKMSAccessDenied),
+                            @"KMSDisabled" : @(AWSSNSErrorKMSDisabled),
+                            @"KMSInvalidState" : @(AWSSNSErrorKMSInvalidState),
+                            @"KMSNotFound" : @(AWSSNSErrorKMSNotFound),
+                            @"KMSOptInRequired" : @(AWSSNSErrorKMSOptInRequired),
+                            @"KMSThrottling" : @(AWSSNSErrorKMSThrottling),
                             @"NotFound" : @(AWSSNSErrorNotFound),
                             @"PlatformApplicationDisabled" : @(AWSSNSErrorPlatformApplicationDisabled),
+                            @"ResourceNotFound" : @(AWSSNSErrorResourceNotFound),
+                            @"StaleTag" : @(AWSSNSErrorStaleTag),
                             @"SubscriptionLimitExceeded" : @(AWSSNSErrorSubscriptionLimitExceeded),
+                            @"TagLimitExceeded" : @(AWSSNSErrorTagLimitExceeded),
+                            @"TagPolicy" : @(AWSSNSErrorTagPolicy),
                             @"Throttled" : @(AWSSNSErrorThrottled),
                             @"TopicLimitExceeded" : @(AWSSNSErrorTopicLimitExceeded),
                             };
@@ -715,6 +728,29 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
     }];
 }
 
+- (AWSTask<AWSSNSListTagsForResourceResponse *> *)listTagsForResource:(AWSSNSListTagsForResourceRequest *)request {
+    return [self invokeRequest:request
+                    HTTPMethod:AWSHTTPMethodPOST
+                     URLString:@""
+                  targetPrefix:@""
+                 operationName:@"ListTagsForResource"
+                   outputClass:[AWSSNSListTagsForResourceResponse class]];
+}
+
+- (void)listTagsForResource:(AWSSNSListTagsForResourceRequest *)request
+     completionHandler:(void (^)(AWSSNSListTagsForResourceResponse *response, NSError *error))completionHandler {
+    [[self listTagsForResource:request] continueWithBlock:^id _Nullable(AWSTask<AWSSNSListTagsForResourceResponse *> * _Nonnull task) {
+        AWSSNSListTagsForResourceResponse *result = task.result;
+        NSError *error = task.error;
+
+        if (completionHandler) {
+            completionHandler(result, error);
+        }
+
+        return nil;
+    }];
+}
+
 - (AWSTask<AWSSNSListTopicsResponse *> *)listTopics:(AWSSNSListTopicsInput *)request {
     return [self invokeRequest:request
                     HTTPMethod:AWSHTTPMethodPOST
@@ -940,6 +976,29 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
     }];
 }
 
+- (AWSTask<AWSSNSTagResourceResponse *> *)tagResource:(AWSSNSTagResourceRequest *)request {
+    return [self invokeRequest:request
+                    HTTPMethod:AWSHTTPMethodPOST
+                     URLString:@""
+                  targetPrefix:@""
+                 operationName:@"TagResource"
+                   outputClass:[AWSSNSTagResourceResponse class]];
+}
+
+- (void)tagResource:(AWSSNSTagResourceRequest *)request
+     completionHandler:(void (^)(AWSSNSTagResourceResponse *response, NSError *error))completionHandler {
+    [[self tagResource:request] continueWithBlock:^id _Nullable(AWSTask<AWSSNSTagResourceResponse *> * _Nonnull task) {
+        AWSSNSTagResourceResponse *result = task.result;
+        NSError *error = task.error;
+
+        if (completionHandler) {
+            completionHandler(result, error);
+        }
+
+        return nil;
+    }];
+}
+
 - (AWSTask *)unsubscribe:(AWSSNSUnsubscribeInput *)request {
     return [self invokeRequest:request
                     HTTPMethod:AWSHTTPMethodPOST
@@ -956,6 +1015,29 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
 
         if (completionHandler) {
             completionHandler(error);
+        }
+
+        return nil;
+    }];
+}
+
+- (AWSTask<AWSSNSUntagResourceResponse *> *)untagResource:(AWSSNSUntagResourceRequest *)request {
+    return [self invokeRequest:request
+                    HTTPMethod:AWSHTTPMethodPOST
+                     URLString:@""
+                  targetPrefix:@""
+                 operationName:@"UntagResource"
+                   outputClass:[AWSSNSUntagResourceResponse class]];
+}
+
+- (void)untagResource:(AWSSNSUntagResourceRequest *)request
+     completionHandler:(void (^)(AWSSNSUntagResourceResponse *response, NSError *error))completionHandler {
+    [[self untagResource:request] continueWithBlock:^id _Nullable(AWSTask<AWSSNSUntagResourceResponse *> * _Nonnull task) {
+        AWSSNSUntagResourceResponse *result = task.result;
+        NSError *error = task.error;
+
+        if (completionHandler) {
+            completionHandler(result, error);
         }
 
         return nil;

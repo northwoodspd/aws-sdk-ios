@@ -15,7 +15,6 @@
 
 #import "AWSPinpointEventRecorder.h"
 #import "AWSPinpointEvent.h"
-#import "AWSPinpointAnalytics.h"
 #import "AWSPinpointTargeting.h"
 #import "AWSPinpointContext.h"
 #import "AWSPinpointTargetingClient.h"
@@ -23,23 +22,32 @@
 #import "AWSPinpointSessionClient.h"
 #import "AWSPinpointDateUtils.h"
 #import "AWSPinpointConfiguration.h"
+#import "AWSPinpoint.h"
+
+//Analytics error domain
+NSString *const AWSPinpointAnalyticsErrorDomain = @"com.amazonaws.AWSPinpointAnalyticsErrorDomain";
 
 // Pinpoint Abstract Client
 NSUInteger const AWSPinpointClientByteLimitDefault = 5 * 1024 * 1024; // 5MB
 NSTimeInterval const AWSPinpointClientAgeLimitDefault = 0.0; // Keeps the data indefinitely unless it hits the size limit.
 NSUInteger const AWSPinpointClientBatchRecordByteLimitDefault = 512 * 1024;
 NSString *const AWSPinpointClientRecorderDatabasePathPrefix = @"com/amazonaws/AWSPinpointRecorder";
+NSUInteger const AWSPinpointClientValidEvent = 0;
+NSUInteger const AWSPinpointClientInvalidEvent = 1;
 
 // Constants
 NSString *const AWSPinpointEventByteThresholdReachedNotification = @"com.amazonaws.AWSPinpointEventByteThresholdReachedNotification";
 NSString *const AWSPinpointEventByteThresholdReachedNotificationDiskBytesUsedKey = @"diskBytesUsed";
 NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessionKey";
 NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
-
+NSString *const FAILURE_REASON = @"NSLocalizedFailureReason";
 @interface AWSPinpointEventRecorder()
 @property (nonatomic, strong) AWSFMDatabaseQueue *databaseQueue;
 @property (nonatomic, strong) NSString *databasePath;
 @property (nonatomic, strong) AWSPinpointContext *context;
+@property (nonatomic, strong) AWSPinpointEndpointProfile *profile;
+@property (nonatomic, strong) NSObject *lock;
+
 @end
 
 @interface AWSPinpointSession()
@@ -49,13 +57,18 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
 - (UTCTimeMillis) timeDurationInMillis;
 @end
 
-@interface AWSPinpointEvent ()
+@interface AWSPinpointEvent()
 @property (nonatomic, readwrite) AWSPinpointSession *session;
+
 -(instancetype)initWithEventType:(NSString*) theEventType
                   eventTimestamp:(UTCTimeMillis) theEventTimestamp
                          session:(nonnull AWSPinpointSession *)session
                       attributes:(NSMutableDictionary*) attributes
                          metrics:(NSMutableDictionary*) metrics;
+@end
+
+@interface AWSPinpointConfiguration()
+@property (nonnull, strong) NSUserDefaults *userDefaults;
 @end
 
 @implementation AWSPinpointEventRecorder
@@ -69,7 +82,9 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
 - (instancetype)initWithContext:(AWSPinpointContext *) context {
     if (self = [super init]) {
         _context = context;
-        
+        _profile = [_context.targetingClient currentEndpointProfile];
+        _lock = [NSObject new];
+        _submissionInProgress = NO;
         NSString *databaseDirectoryPath = [NSTemporaryDirectory() stringByAppendingPathComponent:AWSPinpointClientRecorderDatabasePathPrefix];
         
         _databasePath = [databaseDirectoryPath stringByAppendingPathComponent:context.configuration.appId];
@@ -92,8 +107,9 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
         
         // Creates a database for the identifier if it doesn't exist.
         AWSDDLogDebug(@"Database path: [%@]", _databasePath);
-        _databaseQueue = [AWSFMDatabaseQueue databaseQueueWithPath:_databasePath];
+        _databaseQueue = [AWSFMDatabaseQueue serialDatabaseQueueWithPath:_databasePath];
         [_databaseQueue inDatabase:^(AWSFMDatabase *db) {
+            db.shouldCacheStatements = YES;
             if (![db executeStatements:@"PRAGMA auto_vacuum = FULL"]) {
                 AWSDDLogError(@"Failed to enable 'auto_vacuum' to 'FULL'. %@", db.lastError);
             }
@@ -151,7 +167,7 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
     if (session && session.sessionId && session.sessionId.length >=1) {
         return session;
     }
-    NSData *sessionData = [[NSUserDefaults standardUserDefaults] dataForKey:AWSPinpointSessionKey];
+    NSData *sessionData = [self.context.configuration.userDefaults dataForKey:AWSPinpointSessionKey];
     AWSPinpointSession *previousSession;
     if (sessionData) {
         previousSession = [NSKeyedUnarchiver unarchiveObjectWithData:sessionData];
@@ -167,7 +183,7 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
     if(sessionId && sessionId.length >= 1) {
         return sessionId;
     }
-    NSData *sessionData = [[NSUserDefaults standardUserDefaults] dataForKey:AWSPinpointSessionKey];
+    NSData *sessionData = [self.context.configuration.userDefaults dataForKey:AWSPinpointSessionKey];
     if (sessionData) {
         AWSPinpointSession *previousSession = [NSKeyedUnarchiver unarchiveObjectWithData:sessionData];
         sessionId = previousSession.sessionId;
@@ -179,15 +195,17 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
     return DEFAULT_SESSION_ID;
 }
 
-- (AWSTask<AWSPinpointEvent *> *) saveEvent:(AWSPinpointEvent *) event {
-    AWSDDLogVerbose(@"saveEvent: [%@]", event.toDictionary);
+- (AWSTask<AWSPinpointEvent *> *) saveEvent:(AWSPinpointEvent *) eventToSave {
+    
     AWSFMDatabaseQueue *databaseQueue = self.databaseQueue;
     NSTimeInterval diskAgeLimit = self.diskAgeLimit;
     NSString *databasePath = self.databasePath;
     NSUInteger notificationByteThreshold = self.notificationByteThreshold;
     NSUInteger diskByteLimit = self.diskByteLimit;
     __weak id notificationSender = self;
-    event.session = [self validateOrRetrieveSession:event.session];
+    eventToSave.session = [self validateOrRetrieveSession:eventToSave.session];
+    __block AWSPinpointEvent *event = [eventToSave copy];
+    AWSDDLogVerbose(@"saveEvent: [%@]", event.toDictionary);
     
     return [[AWSTask taskWithResult:nil] continueWithExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withSuccessBlock:^id _Nullable(AWSTask * _Nonnull task) {
         // Inserts a new record to the database.
@@ -214,7 +232,7 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
                                               @"sessionStartTime": startTime? startTime : @"",
                                               @"sessionStopTime": stopTime? stopTime : @"",
                                               @"timestamp": @([[NSDate date] timeIntervalSince1970]),
-                                              @"dirty" : @NO,
+                                              @"dirty" : [NSNumber numberWithInteger:AWSPinpointClientValidEvent],
                                               @"retryCount" : @0
                                               }
                            ];
@@ -386,13 +404,12 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
         __block NSError *error = nil;
         __block NSMutableArray *events = [NSMutableArray new];
         
-        NSString *selectQuery = @"SELECT id, attributes, eventType, metrics, eventTimestamp, sessionId, sessionStartTime, sessionStopTime, timestamp, retryCount ";
-        NSString *fromQuery = @"FROM Event ";
-        NSString *orderQuery = @"ORDER BY timestamp ASC ";
-        NSString *limitQuery = [NSString stringWithFormat:@"LIMIT %@", limit];
-        
         [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-            AWSFMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"%@%@%@%@", selectQuery, fromQuery, orderQuery, limitQuery]];
+            AWSFMResultSet *rs = [db executeQuery:[NSString stringWithFormat:
+                                                   @"SELECT id, attributes, eventType, metrics, eventTimestamp, sessionId, sessionStartTime, sessionStopTime, timestamp, retryCount "
+                                                   @"FROM Event "
+                                                   @"ORDER BY timestamp ASC "
+                                                   @"LIMIT %@", limit]];
             if (!rs) {
                 AWSDDLogError(@"SQLite error. Rolling back... [%@]", db.lastError);
                 error = db.lastError;
@@ -434,13 +451,12 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
         __block NSError *error = nil;
         __block NSMutableArray *events = [NSMutableArray new];
         
-        NSString *selectQuery = @"SELECT id, attributes, eventType, metrics, eventTimestamp, sessionId, sessionStartTime, sessionStopTime, timestamp, retryCount ";
-        NSString *fromQuery = @"FROM DirtyEvent ";
-        NSString *orderQuery = @"ORDER BY timestamp ASC ";
-        NSString *limitQuery = [NSString stringWithFormat:@"LIMIT %@", limit];
-
         [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-            AWSFMResultSet *rs = [db executeQuery:[NSString stringWithFormat:@"%@%@%@%@", selectQuery, fromQuery, orderQuery, limitQuery]];
+            AWSFMResultSet *rs = [db executeQuery:[NSString stringWithFormat:
+                                                   @"SELECT id, attributes, eventType, metrics, eventTimestamp, sessionId, sessionStartTime, sessionStopTime, timestamp, retryCount "
+                                                   @"FROM DirtyEvent "
+                                                   @"ORDER BY timestamp ASC "
+                                                   @"LIMIT %@", limit]];
             if (!rs) {
                 AWSDDLogError(@"SQLite error. Rolling back... [%@]", db.lastError);
                 error = db.lastError;
@@ -473,70 +489,100 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
 
 
 - (AWSTask<NSArray<AWSPinpointEvent *> *> *)submitAllEvents {
-    __block NSMutableArray *result = [NSMutableArray new];
-    __block AWSTask *returnTask;
-    
-    [self getBatchRecords:^(NSArray *events, NSArray *eventIds, NSError *error) {
-        returnTask = [self submitEvents:&result events:events eventIds:eventIds error:error];
-    }];
-    
-    return returnTask;
+    @synchronized(self.lock) {
+        __block NSMutableArray *result = [NSMutableArray new];
+        __block AWSTask *returnTask;
+        
+        if (!self.submissionInProgress) {
+            self.submissionInProgress = YES;
+            dispatch_group_t serviceGroup = dispatch_group_create();
+            dispatch_group_enter(serviceGroup);
+            
+            self.profile = [self.context.targetingClient currentEndpointProfile];
+            [self getBatchRecords:^(NSDictionary *eventsWithEventId, NSError *error) {
+                __block NSError *_error = [error copy];
+                __block NSDictionary *_eventsWithEventId = [eventsWithEventId copy];
+                returnTask = [[self submitEvents:&result eventsWithEventId:_eventsWithEventId error:_error]
+                              continueWithBlock:^id _Nullable(AWSTask<NSArray<AWSPinpointEvent *> *> * _Nonnull t) {
+                                  dispatch_group_leave(serviceGroup);
+                                  return t;
+                              }];
+            }];
+            
+            dispatch_group_notify(serviceGroup,dispatch_get_main_queue(),^{
+                self.submissionInProgress = NO;
+            });
+        } else {
+            returnTask = [AWSTask taskWithError:[NSError errorWithDomain:AWSPinpointAnalyticsErrorDomain
+                                                                    code:AWSPinpointTargetingErrorTooManyRequests
+                                                                userInfo:@{NSLocalizedDescriptionKey: @"Event submission is in progress."}]];
+        }
+        return returnTask;
+    }
 }
 
 - (AWSTask<NSArray<AWSPinpointEvent *> *> *)submitEvents:(NSMutableArray**) resultEvents
-                                                  events:(NSArray *)events
-                                                eventIds:(NSArray *)eventIds
+                                       eventsWithEventId:(NSDictionary *)eventsWithEventId
                                                    error:(NSError *)error {
     __block AWSTask *returnTask;
     __block NSMutableArray *result = *resultEvents;
+    __block NSDictionary *_eventsWithEventId = [eventsWithEventId copy];
+    __block NSError *_error = [error copy];
     
-    AWSDDLogVerbose(@"Submitting Batch with %lu events ", (unsigned long)[events count]);
+    AWSDDLogVerbose(@"Submitting Batch with %lu events ", (unsigned long)[eventsWithEventId count]);
     
-    if (error) {
-        returnTask = [AWSTask taskWithError:error];
-    } else if ([events count] < 1) {
-        error = [NSError errorWithDomain:AWSValidationErrorDomain code:400 userInfo:@{@"message":@"No events to submit."}];
-        returnTask = [AWSTask taskWithError:error];
+    if (_error) {
+        returnTask = [AWSTask taskWithError:_error];
+    } else if ([_eventsWithEventId count] < 1) {
+        AWSDDLogWarn(@"No events to submit.");
+        _error = [NSError errorWithDomain:AWSPinpointAnalyticsErrorDomain
+                                     code:AWSPinpointAnalyticsErrorUnknown
+                                 userInfo:@{NSLocalizedDescriptionKey: @"No events to submit."}];
+        returnTask = [AWSTask taskWithError:_error];
     } else {
-        returnTask = [[self submitBatchEvents:events withEventIds:eventIds] continueWithBlock:^id _Nullable(AWSTask<NSArray<AWSPinpointEvent *> *> * _Nonnull t) {
+        returnTask = [[self submitBatchEvents:_eventsWithEventId] continueWithBlock:^id _Nullable(AWSTask<NSDictionary <NSString *, NSDictionary *> *> * _Nonnull t) {
             __block AWSTask *nextTask;
             
             if (t.error) {
                 nextTask = [AWSTask taskWithError:t.error];
             } else {
-                [result addObjectsFromArray:t.result]; //Aggregate results
-                
-                [self getBatchRecords:^(NSArray *events, NSArray *eventIds, NSError *error) {
-                    if (error) {
+                for (NSDictionary* object in [t.result allValues]) {
+                    if ([[object objectForKey:@"statusCode"] intValue] == 202) {
+                        //Aggregate results
+                        [result addObject:[object objectForKey:@"event"]];
+                    }
+                }
+
+                [self getBatchRecords:^(NSDictionary *eventsWithEventId, NSError *error) {
+                    __block NSError *__error = error;
+                    __block NSDictionary *__eventsWithEventId = eventsWithEventId;
+                    if (__error) {
                         nextTask = [AWSTask taskWithError:t.error];
-                    } else if ([events count] > 0) {
-                        nextTask = [self submitEvents:&result events:events eventIds:eventIds error:error];
+                    } else if ([eventsWithEventId count] > 0) {
+                        nextTask = [self submitEvents:&result eventsWithEventId:__eventsWithEventId error:__error];
                     } else {
                         nextTask = [AWSTask taskWithResult:result];
                     }
-                    
                 }];
             }
-            
             return nextTask;
         }];
     }
     
-    
     return returnTask;
 }
 
-- (void) getBatchRecords:(void (^)(NSArray *events, NSArray *eventIds, NSError *error))result {
+- (void) getBatchRecords:(void (^)(NSDictionary *eventsWithEventId, NSError *error))result {
     AWSFMDatabaseQueue *databaseQueue = self.databaseQueue;
     __block NSError *error = nil;
     
     [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-        NSMutableArray *eventIds = nil;
-        AWSFMResultSet *rs = [db executeQuery:
-                              @"SELECT id, attributes, eventType, metrics, eventTimestamp, sessionId, sessionStartTime, sessionStopTime, timestamp, retryCount "
-                              @"FROM Event "
-                              @"ORDER BY timestamp ASC "
-                              @"LIMIT 1000"];
+        AWSFMResultSet *rs = [db executeQuery:[NSString stringWithFormat:
+                                               @"SELECT id, attributes, eventType, metrics, eventTimestamp, sessionId, sessionStartTime, sessionStopTime, timestamp, retryCount "
+                                               @"FROM Event "
+                                               @"WHERE dirty = %@ "
+                                               @"ORDER BY timestamp ASC "
+                                               @"LIMIT 1000", [NSNumber numberWithInteger:AWSPinpointClientValidEvent]]];
         if (!rs) {
             AWSDDLogError(@"SQLite error. Rolling back... [%@]", db.lastError);
             error = db.lastError;
@@ -544,10 +590,9 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
             return;
         }
         
-        NSMutableArray *temporaryEvents = [NSMutableArray new];
-        eventIds = [NSMutableArray new];
+        NSMutableDictionary *temporaryEventsWithEventId = [NSMutableDictionary new];
         while ([rs next]) {
-            [temporaryEvents addObject:@{
+            [temporaryEventsWithEventId setObject:@{
                                          @"id": [rs stringForColumn:@"id"],
                                          @"attributes": [rs dataForColumn:@"attributes"],
                                          @"eventType": [rs stringForColumn:@"eventType"],
@@ -556,41 +601,35 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
                                          @"sessionId": [rs stringForColumn:@"sessionId"],
                                          @"sessionStartTime": [rs stringForColumn:@"sessionStartTime"],
                                          @"sessionStopTime": [rs stringForColumn:@"sessionStopTime"]
-                                         }];
+                                         } forKey:[rs stringForColumn:@"id"]];
             
-            [eventIds addObject:[rs stringForColumn:@"id"]];
-            
-            NSData *batchData = [NSKeyedArchiver archivedDataWithRootObject:temporaryEvents];
+            NSData *batchData = [NSKeyedArchiver archivedDataWithRootObject:temporaryEventsWithEventId];
             if ([batchData length] > self.batchRecordsByteLimit) { // if the batch size exceeds `batchRecordsByteLimit`, stop there.
                 break;
             }
         }
         rs = nil;
         
-        result(temporaryEvents, eventIds, error);
+        result(temporaryEventsWithEventId, error);
     }];
 }
 
-- (AWSTask<NSArray<AWSPinpointEvent *> *> *)submitBatchEvents:(NSArray*) events
-                                                 withEventIds:(NSArray*) eventIds {
+- (AWSTask<NSDictionary <NSString *, NSDictionary *> *> *)submitBatchEvents:(NSDictionary*) eventsWithEventId{
     AWSFMDatabaseQueue *databaseQueue = self.databaseQueue;
-    NSArray *temporaryEvents = [events copy];
-    
-    return [[AWSTask taskWithResult:nil] continueWithExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withSuccessBlock:^id _Nullable(AWSTask * _Nonnull task) {
+    NSDictionary *temporaryEvents = [eventsWithEventId copy];
+
+    return [[AWSTask taskWithResult:nil] continueWithExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]]
+                                             withSuccessBlock:^id _Nullable(AWSTask * _Nonnull task) {
         __block NSError *error = nil;
-        __block BOOL stop = NO;
-        __block NSMutableArray *events = [NSMutableArray new];
-        
-        AWSTask *submitTask = [[self submitEvents:temporaryEvents
-                                            error:&error
-                                         eventIDs:eventIds
-                                             stop:&stop]
-                               continueWithBlock:^id _Nullable(AWSTask * _Nonnull task) {
+        __block NSMutableDictionary *events = [NSMutableDictionary new];
+        AWSTask *submitTask = [[self putEvents:temporaryEvents
+                                         error:&error]
+                               continueWithBlock:^id _Nullable(AWSTask * _Nonnull task) {                                   
                                    if (task.error) {
                                        error = task.error;
                                        return [AWSTask taskWithError:task.error];
                                    }
-                                   [events addObjectsFromArray:task.result];
+                                   [events addEntriesFromDictionary:task.result];
                                    return [AWSTask taskWithResult:events];
                                }];
         
@@ -598,10 +637,10 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
             AWSTask *failTask = [AWSTask taskFromExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withBlock:^id _Nonnull{
                 // If an event failed three times, mark even as dirty
                 [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-                    BOOL result = [db executeUpdate:
-                                   @"UPDATE Event "
-                                   @"SET dirty = 1 "
-                                   @"WHERE retryCount > 3"];
+                    BOOL result = [db executeUpdate:[NSString stringWithFormat:
+                                                     @"UPDATE Event "
+                                                     @"SET dirty = %@ "
+                                                     @"WHERE retryCount > 3", [NSNumber numberWithInteger:AWSPinpointClientInvalidEvent]]];
                     if (!result) {
                         AWSDDLogError(@"SQLite error. [%@]", db.lastError);
                         error = db.lastError;
@@ -613,10 +652,10 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
             AWSTask *moveTask = [AWSTask taskFromExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withBlock:^id _Nonnull{
                 //Move dirty events into DirtyEvent table
                 [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-                    BOOL result = [db executeUpdate:
-                                   @"INSERT INTO DirtyEvent "
-                                   @"SELECT * FROM Event "
-                                   @"WHERE dirty = 1"];
+                    BOOL result = [db executeUpdate:[NSString stringWithFormat:
+                                                     @"INSERT INTO DirtyEvent "
+                                                     @"SELECT * FROM Event "
+                                                     @"WHERE dirty = %@ ", [NSNumber numberWithInteger:AWSPinpointClientInvalidEvent]]];
                     if (!result) {
                         AWSDDLogError(@"SQLite error. [%@]", db.lastError);
                         error = db.lastError;
@@ -628,9 +667,9 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
             AWSTask *deleteTask = [AWSTask taskFromExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withBlock:^id _Nonnull{
                 //Delete dirty events
                 [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-                    BOOL result = [db executeUpdate:
-                                   @"DELETE FROM Event "
-                                   @"WHERE dirty = 1"];
+                    BOOL result = [db executeUpdate:[NSString stringWithFormat:
+                                                     @"DELETE FROM Event "
+                                                     @"WHERE dirty = %@ ", [NSNumber numberWithInteger:AWSPinpointClientInvalidEvent]]];
                     if (!result) {
                         AWSDDLogError(@"SQLite error. [%@]", db.lastError);
                         error = db.lastError;
@@ -721,47 +760,147 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
     }
 }
 
-- (AWSTask *)submitEvents:(NSArray *)temporaryEvents
-                    error:(NSError* __autoreleasing *) error
-                 eventIDs:(NSArray *)eventIDs
-                     stop:(BOOL *)stop {
+- (BOOL)isRetryable:(NSError *) error {
+    NSArray *errors = @[@"SerializationException", @"BadRequestException", @"ValidationException"];
+    if ([error.domain isEqualToString:AWSPinpointTargetingErrorDomain]
+        && (error.code == AWSPinpointTargetingErrorBadRequest || [errors containsObject:error.userInfo[FAILURE_REASON]])) {
+        return NO;
+    }
+    return YES;
+}
+
+- (void) processEndpointResponse:(NSString *) endpointId
+                  resultResponse:(AWSPinpointTargetingPutEventsResponse *) response {
+    @try {
+        if([[response.eventsResponse.results objectForKey:endpointId].endpointItemResponse.statusCode intValue] == 202) {
+            AWSDDLogVerbose(@"EndpointProfile updated successfully.");
+        } else {
+            AWSDDLogError(@"AmazonServiceException occurred during endpoint update. Error: [%@]", [response.eventsResponse.results objectForKey:endpointId].endpointItemResponse.message);
+        }
+    } @catch(NSException *exception) {
+        AWSDDLogError(@"Error in parsing the endpoint response for endpoint: [%@]. Error: [%@]", endpointId, exception);
+    }
+}
+
+- (NSDictionary *)processEventsResponse:(NSDictionary *) _temporaryEvents
+                             endpointId:(NSString *) endpointId
+                         resultResponse:(AWSPinpointTargetingPutEventsResponse *) response
+                         returnedEvents:(NSMutableDictionary*) events {
+    NSMutableDictionary *acceptedEvents = [NSMutableDictionary new];
+    NSMutableDictionary *retryableEvents = [NSMutableDictionary new];
+    NSMutableDictionary *dirtyEvents = [NSMutableDictionary new];
+    NSMutableDictionary *processedEvents = [NSMutableDictionary new];
+    for(NSString *eventId in _temporaryEvents) {
+        @try {
+            AWSPinpointTargetingEventItemResponse *responseMessage = [[response.eventsResponse.results objectForKey:endpointId].eventsItemResponse objectForKey:eventId];
+            //here is to attach response to each event so that developers know whether
+            //an event submitted is succeeded or not and they can debug.
+            AWSPinpointEvent *event = [events objectForKey:eventId];
+            NSDictionary *eventResponse = [[NSDictionary alloc] initWithObjectsAndKeys:
+                                           event, @"event", responseMessage.statusCode, @"statusCode", responseMessage.message, @"message", nil];
+            [events setObject:eventResponse forKey:eventId];
+            
+            if ([responseMessage.message isEqualToString:@"Accepted"]) {
+                [acceptedEvents setObject:_temporaryEvents[eventId] forKey:eventId];
+                AWSDDLogVerbose(@"Successful submit event with event id %@", eventId);
+            } else if ([self isRetryable:[NSError errorWithDomain:AWSPinpointTargetingErrorDomain
+                                                             code:[responseMessage.statusCode intValue]
+                                                         userInfo:[[NSDictionary alloc]initWithObjectsAndKeys:
+                                                                   responseMessage.message, @"NSLocalizedFailureReason", nil]]]) {
+                                                             [retryableEvents setObject:_temporaryEvents[eventId] forKey:eventId];
+                                                             AWSDDLogWarn(@"Unable to successfully deliver event to server. Event will be saved with retry count += 1. Event id %@", eventId);
+            } else {
+                [dirtyEvents setObject:_temporaryEvents[eventId]
+                                forKey:eventId];
+                AWSDDLogError(@"Server rejected submission of event. (Event will be marked dirty.) %@", eventId);
+            }
+        } @catch (NSException *exception) {
+            AWSDDLogError(@"Error in parsing the event response for event: [%@]. Error: [%@]", eventId, exception);
+        }
+    }
+    [processedEvents setObject:acceptedEvents forKey:@"acceptedEvents"];
+    [processedEvents setObject:retryableEvents forKey:@"retryableEvents"];
+    [processedEvents setObject:dirtyEvents forKey:@"dirtyEvents"];
+    return (NSDictionary *)processedEvents;
+}
+
+- (AWSTask *) putEvents:(NSDictionary *) temporaryEvents
+                 error:(NSError* __autoreleasing *) error {
+    return [self putEvents:temporaryEvents error:error endpointProfile:self.profile];
+}
+
+- (NSError *) processError:(NSError *) PinpointError {
+    if (PinpointError.domain == AWSPinpointTargetingErrorDomain) {
+        if (PinpointError.code == AWSPinpointTargetingErrorBadRequest) {
+            return [NSError errorWithDomain:AWSPinpointAnalyticsErrorDomain
+                                       code:AWSPinpointAnalyticsErrorBadRequest
+                                   userInfo:PinpointError.userInfo];
+        }
+
+        return [NSError errorWithDomain:AWSPinpointAnalyticsErrorDomain
+                                                   code:AWSPinpointAnalyticsErrorUnknown
+                                               userInfo:PinpointError.userInfo];
+    } else {
+        return PinpointError;
+    }
+}
+
+- (AWSTask *)putEvents:(NSDictionary *) temporaryEvents
+                 error:(NSError* __autoreleasing *) error
+       endpointProfile:(AWSPinpointEndpointProfile *) profile {
     AWSFMDatabaseQueue *databaseQueue = self.databaseQueue;
     
-    NSMutableArray *events = [NSMutableArray new];
-    
-    for (NSDictionary *eventDictionary in temporaryEvents) {
-        NSMutableDictionary *attributes = [NSKeyedUnarchiver unarchiveObjectWithData:eventDictionary[@"attributes"]];
-        NSMutableDictionary *metrics = [NSKeyedUnarchiver unarchiveObjectWithData:eventDictionary[@"metrics"]];
-        AWSPinpointSession *session = [[AWSPinpointSession alloc] initWithSessionId:eventDictionary[@"sessionId"]
-                                                                      withStartTime:[NSDate aws_dateFromString:eventDictionary[@"sessionStartTime"] format:AWSDateISO8601DateFormat3]
-                                                                       withStopTime:[NSDate aws_dateFromString:eventDictionary[@"sessionStopTime"] format:AWSDateISO8601DateFormat3]];
-        AWSPinpointEvent *event = [[AWSPinpointEvent alloc] initWithEventType:eventDictionary[@"eventType"]
-                                                               eventTimestamp:[AWSPinpointDateUtils utcTimeMillisFromISO8061String:eventDictionary[@"eventTimestamp"]]
-                                                                      session:session
-                                                                   attributes:attributes
-                                                                      metrics:metrics];
-        [events addObject:event];
+    __block NSMutableDictionary *events = [NSMutableDictionary new]; //events to be submitted, and returned back to caller for debugging
+    __block NSDictionary *_temporaryEvents = [temporaryEvents copy]; //aggregate attributes, metrics...
+    for (NSString *eventId in _temporaryEvents) {
+        NSMutableDictionary *attributes;
+
+        if ([_temporaryEvents[eventId] objectForKey:@"attributes"]) {
+            attributes = [NSKeyedUnarchiver unarchiveObjectWithData:_temporaryEvents[eventId][@"attributes"]];
+        }
+        NSMutableDictionary *metrics;
+        if ([_temporaryEvents[eventId] objectForKey:@"metrics"]) {
+            metrics = [NSKeyedUnarchiver unarchiveObjectWithData:_temporaryEvents[eventId][@"metrics"]];
+        }
+        
+        AWSPinpointSession *session;
+        if ([_temporaryEvents[eventId] objectForKey:@"sessionId"] &&
+            [_temporaryEvents[eventId] objectForKey:@"sessionStartTime"] &&
+            [_temporaryEvents[eventId] objectForKey:@"sessionStopTime"]) {
+            session = [[AWSPinpointSession alloc] initWithSessionId:_temporaryEvents[eventId][@"sessionId"]
+                                                      withStartTime:[NSDate aws_dateFromString:_temporaryEvents[eventId][@"sessionStartTime"] format:AWSDateISO8601DateFormat3]
+                                                       withStopTime:[NSDate aws_dateFromString:_temporaryEvents[eventId][@"sessionStopTime"] format:AWSDateISO8601DateFormat3]];
+        }
+        
+        AWSPinpointEvent *event;
+        if ([_temporaryEvents[eventId] objectForKey:@"eventType"] && [_temporaryEvents[eventId] objectForKey:@"eventTimestamp"]) {
+             event = [[AWSPinpointEvent alloc] initWithEventType:_temporaryEvents[eventId][@"eventType"]
+                                                  eventTimestamp:[AWSPinpointDateUtils utcTimeMillisFromISO8061String:_temporaryEvents[eventId][@"eventTimestamp"]]
+                                                         session:session
+                                                      attributes:attributes
+                                                         metrics:metrics];
+            [events setObject:event forKey:eventId];
+        }
+        
     }
     
-    AWSPinpointAnalyticsPutEventsInput *putEventsInput = [self putEventsInputForEvents:events];
+    AWSPinpointTargetingPutEventsRequest *putEventsRequest = [self putEventsRequestForEvents:events
+                                                                             endpointProfile:profile];
     
-    AWSDDLogVerbose(@"putEventsInput: [%@]", putEventsInput);
+    AWSDDLogVerbose(@"PutEventsRequest: [%@]", putEventsRequest);
     
-    return [[self.context.analyticsService putEvents:putEventsInput] continueWithBlock:^id _Nullable(AWSTask * _Nonnull task) {
+    return [[self.context.targetingService putEvents:putEventsRequest] continueWithBlock:^id _Nullable(AWSTask * _Nonnull task) {
+        //PutEvents encountered an exception
         if (task.error) {
-            AWSDDLogError(@"Error: [%@]", task.error);
-            if ([task.error.domain isEqualToString:NSURLErrorDomain]) {
-                *stop = YES;
-            }
-            if ([task.error.domain isEqualToString:AWSPinpointAnalyticsErrorDomain]
-                && (task.error.code == AWSPinpointAnalyticsErrorBadRequest || [task.error.userInfo[@"NSLocalizedFailureReason"] isEqualToString:@"ValidationException"]) ) {
+            AWSDDLogError(@"PutEvents Error: [%@]", task.error);
+            if (![self isRetryable:task.error]) {
                 NSInteger responseCode = [task.error.userInfo[@"responseStatusCode"] integerValue];
                 AWSDDLogError(@"Server rejected submission of %lu events. (Events will be marked dirty.) Response code:%ld, Error Message:%@", (unsigned long)[events count], (long)responseCode, task.error);
                 
                 return [AWSTask taskForCompletionOfAllTasksWithResults:@[[AWSTask taskFromExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withBlock:^id _Nonnull{
-                    for (NSString *eventID in eventIDs) {
+                    for (__block NSString *eventID in _temporaryEvents) {
                         [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
-                            BOOL result = [db executeUpdate:@"UPDATE Event SET dirty = 1 WHERE id = :id"
+                            BOOL result = [db executeUpdate:[NSString stringWithFormat:@"UPDATE Event SET dirty = %@ WHERE id = :id", [NSNumber numberWithInteger:AWSPinpointClientInvalidEvent]]
                                     withParameterDictionary:@{
                                                               @"id" : eventID
                                                               }];
@@ -771,12 +910,12 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
                             }
                         }];
                     }
-                    return task;
+                    return [AWSTask taskWithError:[self processError:task.error]];
                 }]]];
             } else {
                 AWSDDLogError(@"Unable to successfully deliver events to server. Events will be retried. Error Message:%@", task.error);
                 return [AWSTask taskForCompletionOfAllTasksWithResults:@[[AWSTask taskFromExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withBlock:^id _Nonnull{
-                    for (NSString *eventID in eventIDs) {
+                    for (__block NSString *eventID in _temporaryEvents) {
                         [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
                             BOOL result = [db executeUpdate:@"UPDATE Event SET retryCount = retryCount + 1 WHERE id = :id"
                                     withParameterDictionary:@{
@@ -793,12 +932,26 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
             }
         }
         
+        //PutEventsRequest succeeded, parse the PutEventsResponse
         if (task.result) {
-            NSInteger responseCode = [task.result[@"responseStatusCode"] integerValue];
-            AWSDDLogVerbose(@"The http response code is %ld", (long)responseCode);
-            AWSDDLogInfo(@"Successful submission of %lu events. Response code:%ld", (unsigned long)[events count], (long)responseCode);
+            AWSDDLogVerbose(@"PutEventsResponse received: [%@]", task.result);
+            
+            [self processEndpointResponse:self.profile.endpointId
+                           resultResponse:task.result];
+            
+            NSDictionary *_processedEvents = [self processEventsResponse:_temporaryEvents
+                                                              endpointId:self.profile.endpointId
+                                                          resultResponse:task.result
+                                                          returnedEvents:events];
+
+            AWSDDLogInfo(@"Successfully put events to server--response code: 202. accepted: %u; retryable: %u; dirty: %u",
+                         (unsigned int)[[_processedEvents objectForKey:@"acceptedEvents"] count],
+                         (unsigned int)[[_processedEvents objectForKey:@"retryableEvents"] count],
+                         (unsigned int)[[_processedEvents objectForKey:@"dirtyEvents"] count]);
+
             return [[AWSTask taskForCompletionOfAllTasksWithResults:@[[AWSTask taskFromExecutor:[AWSExecutor executorWithDispatchQueue:[AWSPinpointEventRecorder sharedQueue]] withBlock:^id _Nonnull{
-                for (NSString *eventID in eventIDs) {
+                //submitted events, update database
+                for (__block NSString *eventID in [_processedEvents objectForKey:@"acceptedEvents"]) {
                     [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
                         BOOL result = [db executeUpdate:@"DELETE FROM Event WHERE id = :id"
                                 withParameterDictionary:@{
@@ -810,6 +963,34 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
                         }
                     }];
                 }
+                //retryable events, update database
+                for (__block NSString *eventID in [_processedEvents objectForKey:@"retryableEvents"]) {
+                    [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
+                        BOOL result = [db executeUpdate:@"UPDATE Event SET retryCount = retryCount + 1 WHERE id = :id"
+                                withParameterDictionary:@{
+                                                          @"id" : eventID
+                                                          }];
+                        if (!result) {
+                            AWSDDLogError(@"SQLite error. [%@]", db.lastError);
+                            *error = db.lastError;
+                        }
+                    }];
+                }
+                
+                //rejected events, mark dirty, update database
+                for (__block NSString *eventID in [_processedEvents objectForKey:@"dirtyEvents"]) {
+                    [databaseQueue inTransaction:^(AWSFMDatabase *db, BOOL *rollback) {
+                        BOOL result = [db executeUpdate:[NSString stringWithFormat:@"UPDATE Event SET dirty = %@ WHERE id = :id", [NSNumber numberWithInteger:AWSPinpointClientInvalidEvent]]
+                                withParameterDictionary:@{
+                                                          @"id" : eventID
+                                                          }];
+                        if (!result) {
+                            AWSDDLogError(@"SQLite error. [%@]", db.lastError);
+                            *error = db.lastError;
+                        }
+                    }];
+                }
+                
                 return task;
             }]]] continueWithBlock:^id _Nullable(AWSTask * _Nonnull t) {
                 return [AWSTask taskWithResult:events];
@@ -820,45 +1001,135 @@ NSString *const DEFAULT_SESSION_ID = @"00000000-00000000";
     }];
 }
 
+- (AWSPinpointTargetingPublicEndpoint*) buildEndpointRequestPayload:(AWSPinpointEndpointProfile *) profile {
+    //Build the demographic information
+    AWSPinpointTargetingEndpointDemographic *demographic = [AWSPinpointTargetingEndpointDemographic new];
+    demographic.appVersion = profile.demographic.appVersion;
+    demographic.locale = profile.demographic.locale;;
+    demographic.timezone = profile.demographic.timezone;
+    demographic.make = profile.demographic.make;
+    demographic.model = profile.demographic.model;
+    demographic.platform = profile.demographic.platform;
+    demographic.platformVersion = profile.demographic.platformVersion;
 
-- (AWSPinpointAnalyticsPutEventsInput*) putEventsInputForEvents:(NSArray*) events {
-    AWSPinpointAnalyticsPutEventsInput *putEventInput = [AWSPinpointAnalyticsPutEventsInput new];
+    //Build the endpoint location information
+    AWSPinpointTargetingEndpointLocation *location = [AWSPinpointTargetingEndpointLocation new];
+    location.latitude = profile.location.latitude;
+    location.longitude = profile.location.longitude;
+    location.postalCode = profile.location.postalCode;
+    location.city = profile.location.city;
+    location.region = profile.location.region;
+    location.country = profile.location.country;
     
-    //Set endpoint in clientContext if pinpoint is enabled
-    if (self.context.targetingService) {
-        NSDictionary *endpointCustomAttribute = [NSDictionary dictionaryWithObject:[[self.context.targetingClient currentEndpointProfile] description] forKey:@"endpoint"];
-        [self.context.clientContext setCustomAttributes:endpointCustomAttribute];
+    //Set the endpoint userId
+    AWSPinpointTargetingEndpointUser *user;
+    if (profile.user.userId == NULL) {
+        user = NULL;
+    } else {
+        user = [AWSPinpointTargetingEndpointUser new];
+        user.userId = profile.user.userId;
     }
-    putEventInput.clientContext = [self.context.clientContext JSONString];
     
-    NSMutableArray *parsedEventsArray = [NSMutableArray new];
-    for (AWSPinpointEvent *event in events) {
-        AWSPinpointAnalyticsEvent *serviceEvent = [AWSPinpointAnalyticsEvent new];
-        AWSPinpointAnalyticsSession *serviceSession = [AWSPinpointAnalyticsSession new];
-        
-        //Build attributes
-        NSMutableDictionary *mutableAttributesDic = [NSMutableDictionary dictionaryWithDictionary:event.allAttributes];
-        NSMutableDictionary *mutableMetricsDic = [NSMutableDictionary dictionaryWithDictionary:event.allMetrics];
-        serviceEvent.attributes = mutableAttributesDic;
-        serviceEvent.metrics = mutableMetricsDic;
-        
-        //Build session
-        serviceSession.identifier = event.session.sessionId;
-        serviceSession.startTimestamp = [event.session.startTime aws_stringValue:AWSDateISO8601DateFormat3];
-        serviceSession.stopTimestamp = [event.session.stopTime aws_stringValue:AWSDateISO8601DateFormat3];
-        serviceSession.duration = [NSNumber numberWithUnsignedLongLong:[event.session timeDurationInMillis]];
-        serviceEvent.session = serviceSession;
-        
-        //Event type and timestamp
-        serviceEvent.eventType = event.eventType;
-        serviceEvent.timestamp = [AWSPinpointDateUtils isoDateTimeWithTimestamp:event.eventTimestamp];
-        
-        [parsedEventsArray addObject:serviceEvent];
+    //Create the PublicEndpoint object and set the endpoint specific information
+    AWSPinpointTargetingPublicEndpoint *endpoint = [AWSPinpointTargetingPublicEndpoint new];
+    endpoint.channelType = [profile.channelType isEqualToString:@"APNS"] ? AWSPinpointTargetingChannelTypeApns : AWSPinpointTargetingChannelTypeApnsSandbox;
+    endpoint.address = profile.address;
+    endpoint.location = location;
+    endpoint.demographic = demographic;
+    endpoint.effectiveDate = [[NSDate date] aws_stringValue:AWSDateISO8601DateFormat3];
+    endpoint.optOut = profile.optOut;
+    endpoint.attributes = [profile allAttributes];
+    endpoint.metrics = [profile allMetrics];
+    endpoint.user = user;
+    
+    return endpoint;
+}
+
+- (AWSPinpointTargetingEvent*) buildEventPayload:(AWSPinpointEvent*) event {
+    //Build attributes and metrics
+    NSMutableDictionary *mutableAttributesDic = [NSMutableDictionary dictionaryWithDictionary:event.allAttributes];
+    NSMutableDictionary *mutableMetricsDic = [NSMutableDictionary dictionaryWithDictionary:event.allMetrics];
+    
+    //Build session
+    AWSPinpointTargetingSession *serviceSession = [AWSPinpointTargetingSession new];
+    serviceSession.identifier = event.session.sessionId;
+    serviceSession.startTimestamp = [event.session.startTime aws_stringValue:AWSDateISO8601DateFormat3];
+    serviceSession.stopTimestamp = [event.session.stopTime aws_stringValue:AWSDateISO8601DateFormat3];
+    serviceSession.duration = [NSNumber numberWithUnsignedLongLong:[event.session timeDurationInMillis]];
+    
+    //Create the event and set the event specific information
+    AWSPinpointTargetingEvent *serviceEvent = [AWSPinpointTargetingEvent new];
+    serviceEvent.appPackageName = _context.configuration.environment.appPackageName;
+    serviceEvent.appTitle = _context.configuration.environment.appName;
+    serviceEvent.appVersionCode = _context.configuration.environment.appVersion;
+    serviceEvent.attributes = mutableAttributesDic;
+    serviceEvent.clientSdkVersion = [AWSPinpointTargetingSDKVersion copy];
+    serviceEvent.eventType = event.eventType;
+    serviceEvent.metrics = mutableMetricsDic;
+    serviceEvent.session = serviceSession;
+    
+    //This value is decided by the Amazon Pinpoint service
+    serviceEvent.sdkName = @"aws-sdk-iOS";
+    serviceEvent.timestamp = [AWSPinpointDateUtils isoDateTimeWithTimestamp:event.eventTimestamp];
+    
+    return serviceEvent;
+}
+
+/**
+ * Build the request payload by aggregating the endpoint payload and
+ * the events payload in the following format:
+ *
+ * "PutEventsRequest": {
+ *   "ApplicationId:: "String",
+ *   "EventsRequest": {
+ *     "BatchItem": "[String, EventsBatch]"
+ *   }
+ * }
+ */
+- (AWSPinpointTargetingPutEventsRequest*) buildRequestPayload:(NSString*) applicationId
+                                              endpointPayload:(AWSPinpointTargetingPublicEndpoint*) endpoint
+                                                   endpointId:(NSString*) endpointId
+                                                eventsPayload:(NSDictionary*) events {
+    //Construct the map of [String, EventsBatch]. An EventsBatch contains the endpoint information
+    //and a map of [String, Event]
+    AWSPinpointTargetingEventsBatch *eventsBatch = [AWSPinpointTargetingEventsBatch new];
+    eventsBatch.endpoint = endpoint;
+    eventsBatch.events = events;
+    
+    NSMutableDictionary *eventsBatchMap = [NSMutableDictionary new];
+    [eventsBatchMap setObject:eventsBatch forKey:endpointId];
+    
+    //Build the EventsRequest object that encapsulates the events batch map
+    AWSPinpointTargetingEventsRequest *eventsRequest = [AWSPinpointTargetingEventsRequest new];
+    eventsRequest.batchItem = eventsBatchMap;
+    
+    //Build the PutEvents object that encapsulates the EventsRequest and the Application Id
+    AWSPinpointTargetingPutEventsRequest *putEventsRequest = [AWSPinpointTargetingPutEventsRequest new];
+    putEventsRequest.applicationId = applicationId;
+    putEventsRequest.eventsRequest = eventsRequest;
+    return putEventsRequest;
+}
+
+- (AWSPinpointTargetingPutEventsRequest*) putEventsRequestForEvents:(NSDictionary*) events
+                                                    endpointProfile:(AWSPinpointEndpointProfile*) profile {
+    //build endpoint payload
+    AWSPinpointTargetingPublicEndpoint *endpoint = [self buildEndpointRequestPayload:profile];
+    
+    //build events payload
+    NSMutableDictionary *parsedEventsDictionary = [NSMutableDictionary new];
+    for (NSString *eventId in events) {
+        AWSPinpointTargetingEvent *serviceEvent = [self buildEventPayload:events[eventId]];
+        [parsedEventsDictionary setObject:serviceEvent forKey:eventId];
     }
-    putEventInput.events = parsedEventsArray;
     
-    return putEventInput;
+    //build the PutEventsRequest that contains the endpoint and the events
+    AWSPinpointTargetingPutEventsRequest *putEventRequest = [self
+                            buildRequestPayload:profile.applicationId
+                                endpointPayload:endpoint
+                                     endpointId:profile.endpointId
+                                  eventsPayload:parsedEventsDictionary];
+    
+    return putEventRequest;
 }
 
 @end
-

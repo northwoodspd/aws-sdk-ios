@@ -343,7 +343,7 @@ static NSString *testStreamName = nil;
     NSString *partitionKey = [[NSUUID UUID] UUIDString];
     
     NSMutableArray *tasks = [NSMutableArray new];
-    for (int32_t i = 0; i < 12; i++) {
+    for (int32_t i = 0; i < 1000; i++) {
         [tasks addObject:[kinesisRecorder saveRecord:[[NSString stringWithFormat:@"TestString-%02d", i] dataUsingEncoding:NSUTF8StringEncoding]
                                           streamName:testStreamName
                                           partitionKey:partitionKey]];
@@ -380,11 +380,13 @@ static NSString *testStreamName = nil;
         } else {
             int32_t i = 0;
             for (AWSKinesisRecord *record in returnedRecords) {
-                XCTAssertTrue([[[NSString alloc] initWithData:record.data encoding:NSUTF8StringEncoding] hasPrefix:@"TestString-"]);
-                XCTAssertTrue([partitionKey isEqualToString:[record partitionKey]]);
-                i++;
+                if([partitionKey isEqualToString:[record partitionKey]]){
+                    XCTAssertTrue([[[NSString alloc] initWithData:record.data encoding:NSUTF8StringEncoding] hasPrefix:@"TestString-"]);
+                    i++;
+                }
+
             }
-            XCTAssertTrue(i == 12, @"Record count: %d", i);
+            XCTAssertTrue(i == 1000, @"Record count: %d", i);
         }
         
         [expectation fulfill];
@@ -393,6 +395,38 @@ static NSString *testStreamName = nil;
     }];
     
     [self waitForExpectationsWithTimeout:240 handler:^(NSError * _Nullable error) {
+        XCTAssertNil(error);
+    }];
+}
+
+- (void)testSubmitAllRecordsReturnsError {
+    XCTestExpectation *expectation = [self expectationWithDescription:@"Test finished running."];
+
+    NSString *poolId = @"invalidPoolId";
+    AWSCognitoCredentialsProvider *invalidCreds = \
+        [[AWSCognitoCredentialsProvider alloc] initWithRegionType:AWSRegionUSEast1
+                                                   identityPoolId:poolId];
+
+    AWSServiceConfiguration *configuration = \
+        [[AWSServiceConfiguration alloc] initWithRegion:AWSRegionUSEast1
+                                    credentialsProvider:invalidCreds];
+
+    [AWSKinesisRecorder registerKinesisRecorderWithConfiguration:configuration
+                                                          forKey:poolId];
+
+    AWSKinesisRecorder *kinesisRecorder = [AWSKinesisRecorder KinesisRecorderForKey:poolId];
+    [kinesisRecorder saveRecord:[@"testString" dataUsingEncoding:NSUTF8StringEncoding]
+                     streamName:testStreamName];
+
+    AWSTask *submitTask = kinesisRecorder.submitAllRecords;
+
+    [submitTask continueWithBlock:^id(AWSTask *task) {
+        XCTAssertNotNil(task.error, @"Task should have an error due to invalid pool id.");
+        [expectation fulfill];
+        return nil;
+    }];
+
+    [self waitForExpectationsWithTimeout:5 handler:^(NSError * _Nullable error) {
         XCTAssertNil(error);
     }];
 }

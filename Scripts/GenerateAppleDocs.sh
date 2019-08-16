@@ -9,7 +9,7 @@ function cleanup
 }
 
 
-VERSION="2.6.2"
+VERSION="2.10.2"
 if [ -n $1 ] && [ "$1" == "clean" ];
 then
 	cleanup
@@ -32,11 +32,13 @@ else
     cp -r AWSCognito ./docs_tmp/AWSCognito
     cp -r AWSCognitoIdentityProvider ./docs_tmp/AWSCognitoIdentityProvider
     cp -r AWSCloudWatch ./docs_tmp/AWSCloudWatch
+    cp -r AWSConnect ./docs_tmp/AWSConnect
     cp -r AWSDynamoDB ./docs_tmp/AWSDynamoDB
-    cp -r AWSEC2 ./docs_tmp/AWSEC2
     cp -r AWSElasticLoadBalancing ./docs_tmp/AWSElasticLoadBalancing
     cp -r AWSIoT ./docs_tmp/AWSIoT
     cp -r AWSKinesis ./docs_tmp/AWSKinesis
+    cp -r AWSKinesisVideo ./docs_tmp/AWSKinesisVideo
+    cp -r AWSKinesisVideoArchivedMedia ./docs_tmp/AWSKinesisVideoArchivedMedia
     cp -r AWSKMS ./docs_tmp/AWSKMS
     cp -r AWSLambda ./docs_tmp/AWSLambda
     cp -r AWSLex ./docs_tmp/AWSLex
@@ -46,11 +48,16 @@ else
     cp -r AWSPinpoint ./docs_tmp/AWSPinpoint
     cp -r AWSPolly ./docs_tmp/AWSPolly
     cp -r AWSRekognition ./docs_tmp/AWSRekognition
+    cp -r AWSSageMakerRuntime ./docs_tmp/AWSSageMakerRuntime
     cp -r AWSS3 ./docs_tmp/AWSS3
     cp -r AWSSES ./docs_tmp/AWSSES
     cp -r AWSSimpleDB ./docs_tmp/AWSSimpleDB
     cp -r AWSSNS ./docs_tmp/AWSSNS
     cp -r AWSSQS ./docs_tmp/AWSSQS
+    cp -r AWSTextract ./docs_tmp/AWSTextract
+    cp -r AWSTranscribe ./docs_tmp/AWSTranscribe
+    cp -r AWSTranslate ./docs_tmp/AWSTranslate
+    cp -r AWSComprehend ./docs_tmp/AWSComprehend
     cp -r AWSCognitoAuth ./docs_tmp/AWSCognitoAuth
     cp -r AWSAuthSDK/Sources/AWSAuthCore ./docs_tmp/AWSAuthSDK/
     cp -r AWSAuthSDK/Sources/AWSAuthUI ./docs_tmp/AWSAuthSDK/
@@ -58,7 +65,7 @@ else
     cp -r AWSAuthSDK/Sources/AWSGoogleSignIn ./docs_tmp/AWSAuthSDK/
     cp -r AWSAuthSDK/Sources/AWSUserPoolsSignIn ./docs_tmp/AWSAuthSDK/
     cp -r AWSAuthSDK/Sources/AWSAuthUI ./docs_tmp/AWSAuthSDK/
-	
+
     rm -rf ./docs_tmp/AWSCore/Bolts
     rm -rf ./docs_tmp/AWSCore/Fabric
     rm -rf ./docs_tmp/AWSCore/FMDB

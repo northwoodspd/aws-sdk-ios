@@ -16,7 +16,7 @@
 #import "AWSPollySynthesizeSpeechURLBuilder.h"
 
 static NSString *const AWSInfoPollySynthesizeSpeechURLBuilder = @"PollySynthesizeSpeechUrlBuilder";
-static NSString *const AWSPollySDKVersion = @"2.6.2";
+static NSString *const AWSPollySDKVersion = @"2.10.2";
 
 NSString *const AWSPollySynthesizeSpeechURLBuilderErrorDomain = @"com.amazonaws.AWSPollySynthesizeSpeechURLBuilderErrorDomain";
 NSString *const AWSPollyPresignedUrlPath = @"v1/speech";
@@ -30,6 +30,15 @@ NSString *const AWSPollyPresignedUrlPath = @"v1/speech";
 @interface AWSServiceConfiguration()
 
 @property (nonatomic, strong) AWSEndpoint *endpoint;
+
+@end
+
+@interface AWSPollyStartSpeechSynthesisTaskInput()
+
++ (NSValueTransformer *)languageCodeJSONTransformer;
++ (NSValueTransformer *)outputFormatJSONTransformer;
++ (NSValueTransformer *)textTypeJSONTransformer;
++ (NSValueTransformer *)voiceIdJSONTransformer;
 
 @end
 
@@ -182,6 +191,10 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
             [parameters setObject:preSignedURLRequest.speechMarkTypes forKey:@"SpeechMarkTypes"];
         }
         
+        if (preSignedURLRequest.languageCode) {
+            [parameters setObject:[self stringFromLanguageCode:preSignedURLRequest.languageCode] forKey:@"LanguageCode"];
+        }
+        
         NSMutableDictionary *headers = [NSMutableDictionary new];
         [headers setObject:endpoint.hostName forKey:@"host"];
         
@@ -197,132 +210,27 @@ static AWSSynchronizedMutableDictionary *_serviceClients = nil;
 }
 
 - (NSString *)stringFromOutputFormat:(AWSPollyOutputFormat)format{
-    switch (format) {
-        case AWSPollyOutputFormatMp3:
-            return @"mp3";
-        case AWSPollyOutputFormatPcm:
-            return @"pcm";
-        case AWSPollyOutputFormatOggVorbis:
-            return @"ogg_vorbis";
-        case AWSPollyOutputFormatJson:
-            return @"json";
-        case AWSPollyOutputFormatUnknown:
-            return @"";
-    }
+    NSValueTransformer *transformer = [AWSPollyStartSpeechSynthesisTaskInput outputFormatJSONTransformer];
+    NSString *transformedValue = (NSString *)[transformer reverseTransformedValue:(id)@(format)];
+    return transformedValue;
 }
 
 - (NSString *)stringFromTextType:(AWSPollyTextType)textType{
-    switch (textType) {
-        case AWSPollyTextTypeText:
-            return @"text";
-        case AWSPollyTextTypeSsml:
-            return @"ssml";
-        case AWSPollyTextTypeUnknown:
-            return @"";
-    }
+    NSValueTransformer *transformer = [AWSPollyStartSpeechSynthesisTaskInput textTypeJSONTransformer];
+    NSString *transformedValue = (NSString *)[transformer reverseTransformedValue:(id)@(textType)];
+    return transformedValue;
+}
+
+- (NSString *)stringFromLanguageCode: (AWSPollyLanguageCode)languageCode {
+    NSValueTransformer *transformer = [AWSPollyStartSpeechSynthesisTaskInput languageCodeJSONTransformer];
+    NSString *transformedValue = (NSString *)[transformer reverseTransformedValue:(id)@(languageCode)];
+    return transformedValue;
 }
 
 - (NSString *)stringFromVoiceId:(AWSPollyVoiceId)voiceId{
-    switch (voiceId) {
-        case AWSPollyVoiceIdGeraint:
-            return @"Geraint";
-        case AWSPollyVoiceIdGwyneth:
-            return @"Gwyneth";
-        case AWSPollyVoiceIdMads:
-            return @"Mads";
-        case AWSPollyVoiceIdNaja:
-            return @"Naja";
-        case AWSPollyVoiceIdHans:
-            return @"Hans";
-        case AWSPollyVoiceIdMarlene:
-            return @"Marlene";
-        case AWSPollyVoiceIdNicole:
-            return @"Nicole";
-        case AWSPollyVoiceIdRussell:
-            return @"Russell";
-        case AWSPollyVoiceIdAmy:
-            return @"Amy";
-        case AWSPollyVoiceIdBrian:
-            return @"Brian";
-        case AWSPollyVoiceIdEmma:
-            return @"Emma";
-        case AWSPollyVoiceIdRaveena:
-            return @"Raveena";
-        case AWSPollyVoiceIdIvy:
-            return @"Ivy";
-        case AWSPollyVoiceIdJoanna:
-            return @"Joanna";
-        case AWSPollyVoiceIdJoey:
-            return @"Joey";
-        case AWSPollyVoiceIdJustin:
-            return @"Justin";
-        case AWSPollyVoiceIdKendra:
-            return @"Kendra";
-        case AWSPollyVoiceIdKimberly:
-            return @"Kimberly";
-        case AWSPollyVoiceIdSalli:
-            return @"Salli";
-        case AWSPollyVoiceIdConchita:
-            return @"Conchita";
-        case AWSPollyVoiceIdEnrique:
-            return @"Enrique";
-        case AWSPollyVoiceIdMiguel:
-            return @"Miguel";
-        case AWSPollyVoiceIdPenelope:
-            return @"Penelope";
-        case AWSPollyVoiceIdChantal:
-            return @"Chantal";
-        case AWSPollyVoiceIdCeline:
-            return @"Celine";
-        case AWSPollyVoiceIdMathieu:
-            return @"Mathieu";
-        case AWSPollyVoiceIdDora:
-            return @"Dora";
-        case AWSPollyVoiceIdKarl:
-            return @"Karl";
-        case AWSPollyVoiceIdCarla:
-            return @"Carla";
-        case AWSPollyVoiceIdGiorgio:
-            return @"Giorgio";
-        case AWSPollyVoiceIdMizuki:
-            return @"Mizuki";
-        case AWSPollyVoiceIdLiv:
-            return @"Liv";
-        case AWSPollyVoiceIdLotte:
-            return @"Lotte";
-        case AWSPollyVoiceIdRuben:
-            return @"Ruben";
-        case AWSPollyVoiceIdEwa:
-            return @"Ewa";
-        case AWSPollyVoiceIdJacek:
-            return @"Jacek";
-        case AWSPollyVoiceIdJan:
-            return @"Jan";
-        case AWSPollyVoiceIdMaja:
-            return @"Maja";
-        case AWSPollyVoiceIdRicardo:
-            return @"Ricardo";
-        case AWSPollyVoiceIdVitoria:
-            return @"Vitoria";
-        case AWSPollyVoiceIdCristiano:
-            return @"Cristiano";
-        case AWSPollyVoiceIdInes:
-            return @"Ines";
-        case AWSPollyVoiceIdCarmen:
-            return @"Carmen";
-        case AWSPollyVoiceIdMaxim:
-            return @"Maxim";
-        case AWSPollyVoiceIdTatyana:
-            return @"Tatyana";
-        case AWSPollyVoiceIdAstrid:
-            return @"Astrid";
-        case AWSPollyVoiceIdFiliz:
-            return @"Filiz";
-        case AWSPollyVoiceIdVicki:
-            return @"Vicki";
-        default:
-            return nil;
-    }
+    NSValueTransformer *transformer = [AWSPollyStartSpeechSynthesisTaskInput voiceIdJSONTransformer];
+    NSString *transformedValue = (NSString *)[transformer reverseTransformedValue:(id)@(voiceId)];
+    return transformedValue;
 }
 
 @end

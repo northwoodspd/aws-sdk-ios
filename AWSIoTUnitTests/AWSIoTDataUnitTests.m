@@ -110,7 +110,7 @@ static id mockNetworking = nil;
     XCTAssertNotNil(dm);
     XCTAssertEqual(dm.configuration.regionType, AWSRegionUSWest2);
     XCTAssertEqualObjects(dm.configuration.endpoint.URL, [[NSURL alloc] initWithString:@"TESTENDPOINT.iot.amazonaws.com"]);
-    XCTAssertEqual(dm.mqttConfiguration.keepAliveTimeInterval, 60.0);
+    XCTAssertEqual(dm.mqttConfiguration.keepAliveTimeInterval, 300.0);
     XCTAssertEqual(dm.mqttConfiguration.baseReconnectTimeInterval, 1.0);
     XCTAssertEqual(dm.mqttConfiguration.minimumConnectionTimeInterval, 20.0);
     XCTAssertEqual(dm.mqttConfiguration.maximumReconnectTimeInterval, 128.0);
@@ -369,6 +369,60 @@ static id mockNetworking = nil;
     
     XCTAssertTrue(true);
     
+    [AWSIoTData removeIoTDataForKey:key];
+}
+
+- (void)testIOTWebSocketConnectionUsingCustomAuth {
+    NSString *key = @"testIOTWebSocketConnectionUsingCustomAuth";
+    AWSServiceConfiguration *configuration = [[AWSServiceConfiguration alloc] initWithRegion:AWSRegionUSEast1
+                                                                         credentialsProvider:nil];
+    [AWSIoTDataManager registerIoTDataManagerWithConfiguration:configuration
+                                                        forKey:key];
+
+    AWSIoTDataManager *awsClient = [AWSIoTDataManager IoTDataManagerForKey:key];
+    XCTAssertNotNil(awsClient);
+
+    NSString *clientId = @"testClientId";
+
+    BOOL connectionResult = [awsClient connectUsingWebSocketWithClientId:clientId
+                                                            cleanSession:YES
+                                                    customAuthorizerName:@"iot-custom-authorizer"
+                                                            tokenKeyName:@"token-key-name"
+                                                              tokenValue:@"token-value"
+                                                          tokenSignature:@"token-signature"
+                                                          statusCallback:^(AWSIoTMQTTStatus status) {
+
+                                                          }];
+
+    XCTAssertTrue(connectionResult);
+
+    NSString *message = @"test message";
+    NSString *topic = @"test/iot/topic";
+    BOOL returnValue = NO;
+
+    returnValue = [awsClient publishString:message
+                                   onTopic:topic
+                                       QoS:AWSIoTMQTTQoSMessageDeliveryAttemptedAtMostOnce];
+    XCTAssertTrue(returnValue);
+
+    returnValue = [awsClient publishData:[message dataUsingEncoding:NSUTF8StringEncoding]
+                                 onTopic:topic
+                                     QoS:AWSIoTMQTTQoSMessageDeliveryAttemptedAtMostOnce];
+    XCTAssertTrue(returnValue);
+
+    returnValue = [awsClient subscribeToTopic:topic
+                                          QoS:AWSIoTMQTTQoSMessageDeliveryAttemptedAtMostOnce
+                              messageCallback:^(NSData *data) {
+
+                              }];
+    XCTAssertTrue(returnValue);
+
+    [awsClient unsubscribeTopic:topic];
+    XCTAssertTrue(true);
+
+    [awsClient disconnect];
+    XCTAssertTrue(true);
+
     [AWSIoTData removeIoTDataForKey:key];
 }
 

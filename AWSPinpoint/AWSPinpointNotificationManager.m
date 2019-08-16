@@ -21,6 +21,7 @@
 #import "AWSPinpointService.h"
 #import "AWSPinpointEvent.h"
 #import "AWSPinpointContext.h"
+#import "AWSPinpointConfiguration.h"
 
 static NSString *const AWSCampaignDeepLinkKey = @"deeplink";
 static NSString *const AWSAttributeApplicationStateKey = @"applicationState";
@@ -41,6 +42,10 @@ NSString *const AWSPinpointCampaignKey = @"campaign";
 - (void) setCampaignAttributes:(NSDictionary*) campaign;
 @end
 
+@interface AWSPinpointConfiguration()
+@property (nonnull, strong) NSUserDefaults *userDefaults;
+@end
+
 @implementation AWSPinpointNotificationManager
 
 - (instancetype)init {
@@ -57,11 +62,20 @@ NSString *const AWSPinpointCampaignKey = @"campaign";
 }
 
 + (BOOL)isNotificationEnabled {
-    BOOL optOut = ![[UIApplication sharedApplication] isRegisteredForRemoteNotifications];
-    if ([[UIApplication sharedApplication] currentUserNotificationSettings].types == UIUserNotificationTypeNone) {
-        optOut = YES;
+    __block BOOL notificationsEnabled;
+    [self runOnMainThread:^{
+        notificationsEnabled = [[UIApplication sharedApplication] isRegisteredForRemoteNotifications];
+    }];
+    
+    return notificationsEnabled;
+}
+
++ (void) runOnMainThread:(void (^)(void))codeBlock {
+    if ([NSThread isMainThread]) {
+        codeBlock();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), codeBlock);
     }
-    return !optOut;
 }
 
 + (BOOL)validCampaignPushForNotification:(NSDictionary*) notification {
@@ -93,12 +107,11 @@ NSString *const AWSPinpointCampaignKey = @"campaign";
 }
 
 - (void)interceptDidRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
-    NSUserDefaults *userDefaults = [NSUserDefaults standardUserDefaults];
     //Check if device token has changed
-    NSData *currentToken = [userDefaults objectForKey:AWSDeviceTokenKey];
+    NSData *currentToken = [self.context.configuration.userDefaults objectForKey:AWSDeviceTokenKey];
     if (![currentToken isEqualToData:deviceToken]) {
-        [userDefaults setObject:deviceToken forKey:AWSDeviceTokenKey];
-        [userDefaults synchronize];
+        [self.context.configuration.userDefaults setObject:deviceToken forKey:AWSDeviceTokenKey];
+        [self.context.configuration.userDefaults synchronize];
         //Update endpoint
         AWSDDLogInfo(@"Calling endpoint Service to register token");
         

@@ -18,6 +18,7 @@
 #import "AWSPinpoint.h"
 #import <AWSCore/AWSCore.h>
 #import "AWSTask.h"
+#import "AWSPinpointContext.h"
 
 @class AWSPinpointSession;
 
@@ -32,14 +33,29 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
 @end
 
 @interface AWSPinpointSessionClientTests : XCTestCase
+@property (nonatomic, strong) NSUserDefaults *userDefaults;
+@property (nonatomic, strong) NSString *appId;
+@end
 
+
+@interface AWSPinpointConfiguration()
+@property (nonnull, strong) NSUserDefaults *userDefaults;
 @end
 
 @implementation AWSPinpointSessionClientTests
 
 - (void)setUp {
     [super setUp];
+    [[NSUserDefaults standardUserDefaults] removeSuiteNamed:@"AWSPinpointSessionClientTests"];
+    self.userDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"AWSPinpointSessionClientTests"];
     [AWSTestUtility setupCognitoCredentialsProvider];
+    
+    NSString *filePath = [[NSBundle bundleForClass:[self class]] pathForResource:@"credentials"
+                                                                          ofType:@"json"];
+    NSDictionary *credentialsJson = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:filePath]
+                                                                    options:NSJSONReadingMutableContainers
+                                                                      error:nil];
+    self.appId = credentialsJson[@"pinpointAppId"];
 }
 
 - (void)tearDown {
@@ -47,16 +63,17 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
 }
 
 - (void) clearSession {
-    [[NSUserDefaults standardUserDefaults] setObject:nil forKey:AWSPinpointSessionKey];
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:AWSPinpointSessionKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    [[NSUserDefaults standardUserDefaults] removeSuiteNamed:@"AWSPinpointSessionClientTests"];
+    [self.userDefaults setObject:nil forKey:AWSPinpointSessionKey];
+    [self.userDefaults removeObjectForKey:AWSPinpointSessionKey];
+    [self.userDefaults synchronize];
     
-    NSData *data = [[NSUserDefaults standardUserDefaults] dataForKey:AWSPinpointSessionKey];
+    NSData *data = [self.userDefaults dataForKey:AWSPinpointSessionKey];
     AWSPinpointSession *session = [NSKeyedUnarchiver unarchiveObjectWithData:data];
 
     NSLog(@"Session Object Should be Empty: %@",session.description);
     
-    XCTAssertNil([[NSUserDefaults standardUserDefaults] dataForKey:AWSPinpointSessionKey]);
+    XCTAssertNil([self.userDefaults dataForKey:AWSPinpointSessionKey]);
 }
 
 - (void)testConstructors {
@@ -83,8 +100,16 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:5000];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
+    
+    [[pinpoint.analyticsClient.eventRecorder getEvents] continueWithBlock:^id _Nullable(AWSTask * _Nonnull task) {
+        XCTAssertNotNil(task.result);
+        XCTAssertEqual([task.result count], 0);
+        return nil;
+    }];
     
     __block AWSPinpointEvent *event;
     [[[pinpoint.sessionClient startSession] continueWithBlock:^id _Nullable(AWSTask * _Nonnull task) {
@@ -131,6 +156,8 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:5000];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -204,6 +231,8 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:5000];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -230,11 +259,11 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
         XCTAssertTrue([pauseEvent.eventType isEqualToString:@"_session.pause"]);
         XCTAssertTrue(pauseEvent.eventTimestamp > 0);
         XCTAssertNotNil(pauseEvent.allAttributes);
-        XCTAssertEqual([startEvent.allAttributes count], 0);
-        XCTAssertNotNil(startEvent.session);
-        XCTAssertNotNil(startEvent.session.sessionId);
-        XCTAssertNotNil(startEvent.session.startTime);
-        XCTAssertNotNil(startEvent.session.stopTime);
+        XCTAssertEqual([pauseEvent.allAttributes count], 0);
+        XCTAssertNotNil(pauseEvent.session);
+        XCTAssertNotNil(pauseEvent.session.sessionId);
+        XCTAssertNotNil(pauseEvent.session.startTime);
+        XCTAssertNotNil(pauseEvent.session.stopTime);
         XCTAssertNotNil(pauseEvent.allMetrics);
         XCTAssertEqual([pauseEvent.allMetrics count], 0);
         return nil;
@@ -300,6 +329,8 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:5000];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -412,11 +443,13 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
     
     __block XCTestExpectation *expectation = [self expectationWithDescription:@"Test finished running."];
     
-    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:@"testSessionTimeout"
+    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:self.appId
                                                                          launchOptions:nil
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:5000];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -477,11 +510,13 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
     
     __block XCTestExpectation *expectation = [self expectationWithDescription:@"Test finished running."];
     
-    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:@"testSessionTimeoutNoCompletion"
+    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:self.appId
                                                                          launchOptions:nil
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:5000];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -541,11 +576,13 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
     
     __block XCTestExpectation *expectation = [self expectationWithDescription:@"Test finished running."];
     
-    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:@"testSessionImmediateTimeout"
+    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:self.appId
                                                                          launchOptions:nil
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:0];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -605,11 +642,13 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
     
     __block XCTestExpectation *expectation = [self expectationWithDescription:@"Test finished running."];
     
-    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:@"testSessionImmediateTimeoutNoCompletion"
+    AWSPinpointConfiguration *config = [[AWSPinpointConfiguration alloc] initWithAppId:self.appId
                                                                          launchOptions:nil
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:0];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     
@@ -675,6 +714,8 @@ static NSString *const AWSPinpointSessionKey = @"com.amazonaws.AWSPinpointSessio
                                                                         maxStorageSize:5*1024*1024
                                                                         sessionTimeout:0];
     config.enableAutoSessionRecording = NO;
+    config.userDefaults = self.userDefaults;
+    
     AWSPinpoint *pinpoint = [AWSPinpoint pinpointWithConfiguration:config];
     [self cleanupForPinpoint:pinpoint];
     

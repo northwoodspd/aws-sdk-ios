@@ -31,6 +31,13 @@
     }
 }
 
+- (IBAction)textEditingDidBegin:(id)sender {
+    if (!self.placeHolderView.isHidden) {
+        [self onTap];
+    }
+}
+    
+
 - (void)onTap {
     dispatch_async(dispatch_get_main_queue(), ^{
        [UIView transitionWithView:self.placeHolderView
@@ -43,6 +50,15 @@
                        } completion:nil];
         [self.inputBox becomeFirstResponder];
     });
+}
+
+- (void)setAWSTableInputCellFont {
+    UIFont *font = [AWSUserPoolsUIHelper getFont:[AWSUserPoolsUIHelper getAWSUIConfiguration]];
+    if (font != nil) {
+        [self.placeHolderLabel setFont:font];
+        [self.headerLabel setFont:font];
+        [self.inputBox setFont:font];
+    }
 }
 
 @end
